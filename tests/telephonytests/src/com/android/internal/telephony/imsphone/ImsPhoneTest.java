@@ -43,6 +43,7 @@ import android.app.IApplicationThread;
 import android.content.BroadcastReceiver;
 import android.content.IIntentReceiver;
 import android.content.Intent;
+import android.content.res.Resources;
 import android.os.AsyncResult;
 import android.os.Bundle;
 import android.os.Handler;
@@ -65,6 +66,7 @@ import com.android.internal.telephony.Call;
 import com.android.internal.telephony.CallStateException;
 import com.android.internal.telephony.CommandsInterface;
 import com.android.internal.telephony.Connection;
+import com.android.internal.telephony.EcbmHandler;
 import com.android.internal.telephony.Phone;
 import com.android.internal.telephony.PhoneConstants;
 import com.android.internal.telephony.TelephonyIntents;
@@ -540,7 +542,8 @@ public class ImsPhoneTest extends TelephonyTest {
     @Test
     @Ignore
     public void testEcbm() throws Exception {
-        ImsEcbmStateListener imsEcbmStateListener = mImsPhoneUT.getImsEcbmStateListener();
+        ImsEcbmStateListener imsEcbmStateListener =
+                EcbmHandler.getInstance().getImsEcbmStateListener(mPhone.getPhoneId());
 
         // verify handling of emergency callback mode
         imsEcbmStateListener.onECBMEntered();
@@ -568,8 +571,8 @@ public class ImsPhoneTest extends TelephonyTest {
         // verify that wakeLock is acquired in ECM
         assertEquals(true, mImsPhoneUT.getWakeLock().isHeld());
 
-        mImsPhoneUT.setOnEcbModeExitResponse(mTestHandler, EVENT_EMERGENCY_CALLBACK_MODE_EXIT,
-                null);
+        EcbmHandler.getInstance().setOnEcbModeExitResponse(mTestHandler,
+                EVENT_EMERGENCY_CALLBACK_MODE_EXIT, null);
 
         // verify handling of emergency callback mode exit
         imsEcbmStateListener.onECBMExited();
@@ -770,6 +773,54 @@ public class ImsPhoneTest extends TelephonyTest {
     public void testNonNullTrackersInImsPhone() throws Exception {
         assertNotNull(mImsPhoneUT.getEmergencyNumberTracker());
         assertNotNull(mImsPhoneUT.getServiceStateTracker());
+    }
+
+    @Test
+    @SmallTest
+    public void testSendUssdAllowUssdOverImsInOutOfService() throws Exception {
+        Resources resources = mContext.getResources();
+
+        doReturn(true).when(resources).getBoolean(
+                com.android.internal.R.bool.config_allow_ussd_over_ims);
+        doReturn(ServiceState.STATE_OUT_OF_SERVICE).when(mSST.mSS).getState();
+
+        mImsPhoneUT.dial("*135#", new ImsPhone.ImsDialArgs.Builder().build());
+        verify(mImsCT).sendUSSD(eq("*135#"), any());
+    }
+
+    @Test
+    @SmallTest
+    public void testSendUssdAllowUssdOverImsInService() throws Exception {
+        String errorCode = "";
+        Resources resources = mContext.getResources();
+
+        doReturn(true).when(resources).getBoolean(
+                com.android.internal.R.bool.config_allow_ussd_over_ims);
+        doReturn(ServiceState.STATE_IN_SERVICE).when(mSST.mSS).getState();
+
+        try {
+            mImsPhoneUT.dial("*135#", new ImsPhone.ImsDialArgs.Builder().build());
+        } catch (CallStateException e) {
+            errorCode = e.getMessage();
+        }
+        assertEquals(Phone.CS_FALLBACK, errorCode);
+    }
+
+    @Test
+    @SmallTest
+    public void testSendUssdNotAllowUssdOverIms() throws Exception {
+        String errorCode = "";
+        Resources resources = mContext.getResources();
+
+        doReturn(false).when(resources).getBoolean(
+                com.android.internal.R.bool.config_allow_ussd_over_ims);
+
+        try {
+            mImsPhoneUT.dial("*135#", new ImsPhone.ImsDialArgs.Builder().build());
+        } catch (CallStateException e) {
+            errorCode = e.getMessage();
+        }
+        assertEquals(Phone.CS_FALLBACK, errorCode);
     }
 
     private ServiceState getServiceStateDataAndVoice(int rat, int regState, boolean isRoaming) {

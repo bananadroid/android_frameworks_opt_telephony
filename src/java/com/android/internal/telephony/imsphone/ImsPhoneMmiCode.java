@@ -16,6 +16,8 @@
 
 package com.android.internal.telephony.imsphone;
 
+import static android.telephony.ServiceState.STATE_IN_SERVICE;
+
 import static com.android.internal.telephony.CommandsInterface.SERVICE_CLASS_DATA;
 import static com.android.internal.telephony.CommandsInterface.SERVICE_CLASS_DATA_ASYNC;
 import static com.android.internal.telephony.CommandsInterface.SERVICE_CLASS_DATA_SYNC;
@@ -466,6 +468,60 @@ public final class ImsPhoneMmiCode extends Handler implements MmiCode {
         return false;
     }
 
+    static boolean isPinPukCommand(String sc) {
+        return sc != null && (sc.equals(SC_PIN) || sc.equals(SC_PIN2)
+                || sc.equals(SC_PUK) || sc.equals(SC_PUK2));
+    }
+
+    /**
+     * Whether the dial string is supplementary service code.
+     *
+     * @param dialString The dial string.
+     * @return true if the dial string is supplementary service code, and {@code false} otherwise.
+     */
+    public static boolean isSuppServiceCodes(String dialString, Phone phone) {
+        if (phone != null && phone.getServiceState().getVoiceRoaming()
+                && phone.getDefaultPhone().supportsConversionOfCdmaCallerIdMmiCodesWhileRoaming()) {
+            /* The CDMA MMI coded dialString will be converted to a 3GPP MMI Coded dialString
+               so that it can be processed by the matcher and code below
+             */
+            dialString = convertCdmaMmiCodesTo3gppMmiCodes(dialString);
+        }
+
+        Matcher m = sPatternSuppService.matcher(dialString);
+        if (m.matches()) {
+            String sc = makeEmptyNull(m.group(MATCH_GROUP_SERVICE_CODE));
+            if (isServiceCodeCallForwarding(sc)) {
+                return true;
+            } else if (isServiceCodeCallBarring(sc)) {
+                return true;
+            } else if (sc != null && sc.equals(SC_CFUT)) {
+                return true;
+            } else if (sc != null && sc.equals(SC_CLIP)) {
+                return true;
+            } else if (sc != null && sc.equals(SC_CLIR)) {
+                return true;
+            } else if (sc != null && sc.equals(SC_COLP)) {
+                return true;
+            } else if (sc != null && sc.equals(SC_COLR)) {
+                return true;
+            } else if (sc != null && sc.equals(SC_CNAP)) {
+                return true;
+            } else if (sc != null && sc.equals(SC_BS_MT)) {
+                return true;
+            } else if (sc != null && sc.equals(SC_BAICa)) {
+                return true;
+            } else if (sc != null && sc.equals(SC_PWD)) {
+                return true;
+            } else if (sc != null && sc.equals(SC_WAIT)) {
+                return true;
+            } else if (isPinPukCommand(sc)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     static String
     scToBarringFacility(String sc) {
         if (sc == null) {
@@ -653,8 +709,7 @@ public final class ImsPhoneMmiCode extends Handler implements MmiCode {
      * @return true if the Service Code is PIN/PIN2/PUK/PUK2-related
      */
     public boolean isPinPukCommand() {
-        return mSc != null && (mSc.equals(SC_PIN) || mSc.equals(SC_PIN2)
-                              || mSc.equals(SC_PUK) || mSc.equals(SC_PUK2));
+        return isPinPukCommand(mSc);
     }
 
     /**
@@ -806,7 +861,7 @@ public final class ImsPhoneMmiCode extends Handler implements MmiCode {
                 int time = siToTime(mSic);
 
                 if (isInterrogate()) {
-                    mPhone.getCallForwardingOption(reason,
+                    mPhone.getCallForwardingOption(reason, serviceClass,
                             obtainMessage(EVENT_QUERY_CF_COMPLETE, this));
                 } else {
                     int cfAction;
@@ -996,7 +1051,7 @@ public final class ImsPhoneMmiCode extends Handler implements MmiCode {
                 }
             } else if (mSc != null && mSc.equals(SC_WAIT)) {
                 // sia = basic service group
-                int serviceClass = siToServiceClass(mSib);
+                int serviceClass = siToServiceClass(mSia);
 
                 if (isActivate() || isDeactivate()) {
                     mPhone.setCallWaiting(isActivate(), serviceClass,
@@ -1007,11 +1062,28 @@ public final class ImsPhoneMmiCode extends Handler implements MmiCode {
                     throw new RuntimeException ("Invalid or Unsupported MMI Code");
                 }
             } else if (mPoundString != null) {
-                // USSD codes are not supported over IMS due to modem limitations; send over the CS
-                // pipe instead.  This should be fixed in the future.
-                Rlog.i(LOG_TAG, "processCode: Sending ussd string '"
-                        + Rlog.pii(LOG_TAG, mPoundString) + "' over CS pipe.");
-                throw new CallStateException(Phone.CS_FALLBACK);
+                if (mContext.getResources().getBoolean(
+                        com.android.internal.R.bool.config_allow_ussd_over_ims)) {
+                    // We'll normally send USSD over the CS pipe, but if it happens that
+                    // the CS phone is out of service, we'll just try over IMS instead.
+                    if (mPhone.getDefaultPhone().getServiceStateTracker().mSS.getState()
+                            == STATE_IN_SERVICE) {
+                        Rlog.i(LOG_TAG, "processCode: Sending ussd string '"
+                                + Rlog.pii(LOG_TAG, mPoundString) + "' over CS pipe "
+                                + "(allowed over ims).");
+                        throw new CallStateException(Phone.CS_FALLBACK);
+                    } else {
+                        Rlog.i(LOG_TAG, "processCode: CS is out of service, sending ussd string '"
+                                + Rlog.pii(LOG_TAG, mPoundString) + "' over IMS pipe.");
+                        sendUssd(mPoundString);
+                    }
+                } else {
+                    // USSD codes are not supported over IMS due to modem limitations; send over
+                    // the CS pipe instead.  This should be fixed in the future.
+                    Rlog.i(LOG_TAG, "processCode: Sending ussd string '"
+                            + Rlog.pii(LOG_TAG, mPoundString) + "' over CS pipe.");
+                    throw new CallStateException(Phone.CS_FALLBACK);
+                }
             } else {
                 Rlog.d(LOG_TAG, "processCode: invalid or unsupported MMI");
                 throw new RuntimeException ("Invalid or Unsupported MMI Code");
@@ -1098,12 +1170,22 @@ public final class ImsPhoneMmiCode extends Handler implements MmiCode {
                 ar = (AsyncResult) (msg.obj);
 
                 /*
-                * msg.arg1 = 1 means to set unconditional voice call forwarding
-                * msg.arg2 = 1 means to enable voice call forwarding
+                * msg.arg1 = 1 means to set unconditional voice/video call forwarding
+                * msg.arg2 = 1 means to enable voice/video call forwarding
                 */
                 if ((ar.exception == null) && (msg.arg1 == 1)) {
                     boolean cffEnabled = (msg.arg2 == 1);
-                    if (mIccRecords != null) {
+                    /*
+                    * As per 3GPP TS 29002 MAP Specification : Section 17.7.10,
+                    * the BearerServiceCode for "allDataCircuitAsynchronous" is '01010000'.
+                    * Hence, SERVICE_CLASS_DATA_SYNC (1<<4) and SERVICE_CLASS_PACKET (1<<6)
+                    * together make video service class.
+                    */
+                    if(siToServiceClass(mSib) == (SERVICE_CLASS_PACKET
+                                + SERVICE_CLASS_DATA_SYNC)) {
+                        mPhone.setVideoCallForwardingPreference(cffEnabled);
+                        mPhone.notifyCallForwardingIndicator();
+                    } else if (mIccRecords != null) {
                         mPhone.setVoiceCallForwardingFlag(1, cffEnabled, mDialingNumber);
                     }
                 }
@@ -1775,7 +1857,15 @@ public final class ImsPhoneMmiCode extends Handler implements MmiCode {
                         Rlog.d(LOG_TAG, "setVoiceCallForwardingFlag done from SS Info.");
                         //Only CF status is set here as part of activation/registration,
                         //number is not available until interrogation.
-                        mPhone.setVoiceCallForwardingFlag(1, cffEnabled, null);
+                        if (ssData.serviceClass == (SERVICE_CLASS_PACKET
+                                    + SERVICE_CLASS_DATA_SYNC)) {
+                            Rlog.d(LOG_TAG, "setVideoCallForwardingFlag done from SS Info.");
+                            mPhone.setVideoCallForwardingPreference(cffEnabled);
+                            mPhone.notifyCallForwardingIndicator();
+                        } else {
+                            Rlog.d(LOG_TAG, "setVoiceCallForwardingFlag done from SS Info.");
+                            mPhone.setVoiceCallForwardingFlag(1, cffEnabled, null);
+                        }
                     } else {
                         Rlog.e(LOG_TAG, "setCallForwardingFlag aborted. sim records is null.");
                     }
