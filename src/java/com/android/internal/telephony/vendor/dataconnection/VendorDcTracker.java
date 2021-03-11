@@ -20,6 +20,7 @@ import android.app.AlertDialog;
 import android.telephony.AccessNetworkConstants;
 import android.telephony.data.ApnSetting;
 import android.telephony.DataFailCause;
+import android.telephony.data.ApnSetting;
 import android.telephony.Rlog;
 import android.telephony.ServiceState;
 import android.telephony.SubscriptionManager;
